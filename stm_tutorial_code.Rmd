@@ -1,0 +1,623 @@
+---
+title: "Structural topic models for enriching quantitative text analysis<br><small style=margin-top:1cm;>material available at https://github.com/cbpuschmann/stm_ic2s2</small>"
+author: "Cornelius Puschmann & Carsten Schwemmer"
+output:
+  revealjs::revealjs_presentation:
+    mathjax: null
+    center: yes
+    fig_height: 3.5
+    fig_width: 7
+    reveal_options:
+      previewLinks: yes
+      slideNumber: yes
+    theme: default
+    transition: fade
+  html_document:
+    highlight: tango
+    code_folding: show
+date: "July 17, 2019"
+---
+
+# Setup
+
+## Prepare your R environment
+
+- Download and extract the tutorial content from our [github repository](https://github.com/cbpuschmann/stm_ic2s2)
+- Open the R project file `stm_ic2s2.Rproj` in R Studio
+
+## How  R Markdown files work
+
+- Code is placed inside code cells, documentation is placed outside of code cells.
+- Create new code chunks with CTRL/CMD + ALT + I
+- Use CTRL/CMD + SHIFT + ENTER to run entire code cell
+- Use CTRL/CMD + ENTER to run selected code
+
+```{r}
+# this is a  comment inside a code cell
+2+3
+5+2
+```
+
+## Install packages
+
+- Please install the packages that we will need for the tutorial:
+
+```{r, eval = FALSE}
+install.packages(c('tidyverse', 'stm', 'stminsights', 
+                   'quanteda', 'rmarkdown'),  
+                 dependencies = TRUE)
+```
+
+## Loading data and packages
+
+```{r , message=FALSE, warning=FALSE, results = 'hide'}
+library(tidyverse)
+library(stm)
+library(stminsights)
+library(quanteda)
+library(lubridate)
+theme_set(theme_light())
+df <- read_csv('data/donors_choose_sample.csv')
+```
+
+## The data we use for the workshop
+
+-  We will be using a sample from a [Kaggle](https://www.kaggle.com/c/donorschoose-application-screening) Data Science for Good challenge
+- [DonorsChoose.org](https://DonorsChoose.org) provided the data and hosts an online platform where teachers can post requests for resources and people can make donations to these projects
+- The goal of the original challenge was to match previous donors with campaigns that would most likely inspire additional donations
+- The dataset includes request texts and context information might help answer various questions in social science. A description of variables is available [here](https://www.kaggle.com/donorschoose/io/discussion/56030)
+
+## What could we learn from this data?
+
+Examples of questions we might ask: 
+
+- How has classroom technology use changed over time? How does it differ by geographic location and the age of students?
+- How do the requests of schools in urban areas compare to those in rural areas?
+- What predicts whether a project will be funded?
+- How do the predictors of funding vary by geographic location? Or by economic status of the students?
+- Do male and female teachers ask for different resources? Are there differences in the way that they ask for those resources?
+
+
+
+# Formal background of topic models
+
+## Formal background of topic models
+
+See our slides
+
+# Preprocessing and feature selection
+
+## Preprocessing and feature selection
+
+ - Due to time constraints, we will not explain the following code for feature selection in detail.
+ - You can explore it in more detail during the open coding session or after the tutorial.
+ - Use `load("data/stm_donor.RData")` to load the readily processed R objects that we need for the tutorial.
+
+## Inspecting the data structure
+
+```{r}
+glimpse(df)
+```
+
+## Text example for one donation request
+
+```{r}
+cat(df$project_essay[1])
+```
+
+## Preparing texts
+
+We use a [regular expression](https://en.wikipedia.org/wiki/Regular_expression) to clean up the donation texts:
+
+```{r}
+df$project_essay <- str_replace_all(df$project_essay, 
+                    '<!--DONOTREMOVEESSAYDIVIDER-->', '\n\n')
+```
+
+As we will incorporate contextual information of documents in our STM models, we also need to preprocess other variables.
+
+## Working with time stamps
+
+First, we convert the time strings to a date format and then create a numerical variable, where the earliest date corresponds to 0. We do so because estimating STM effects doesn't play nicely with `date` variables.
+
+```{r}
+# CTRL/CMD + SHIFT + M for the pipe operator
+df$date <- ymd(df$project_posted_date)
+min_date <- min(df$date) %>% 
+  as.numeric()
+df$date_num <- as.numeric(df$date) - min_date
+date_table <- df %>% arrange(date_num) %>% select(date, date_num)
+head(date_table, 2)
+```
+
+
+## Example for recoding variables
+
+We can generate a proxy for the gender of teachers by working with their name prefixes.
+
+```{r}
+df %>% count(teacher_prefix)
+```
+
+## Example for recoding variables
+
+```{r}
+df <- df %>% mutate(gender = case_when(
+  teacher_prefix %in% c('Mrs.', 'Ms.') ~ 'Female',
+  teacher_prefix == 'Mr.' ~ 'Male',
+  TRUE ~ 'Other/Non-binary')) # TRUE -> everything else
+df %>% count(gender)
+```
+
+## Other interesting variables: metro type
+
+```{r}
+df %>% count(school_metro_type)
+```
+
+## Other interesting variables: resource type
+
+```{r}
+df %>% count(project_resource_category, sort = TRUE)
+```
+
+## Other interesting variables: children eligible for free lunch
+
+```{r}
+df %>% ggplot(aes(x = school_percentage_free_lunch)) +
+  geom_histogram(bins = 20)
+```
+
+## Text analysis using quanteda
+
+![](https://avatars2.githubusercontent.com/u/34347233?s=200&v=4){width=150px}
+
+- A variety of R packages supports quantitative text analyses. We will focus on [quanteda](https://quanteda.io/), which is created and maintained by social scientists behind the Quanteda Initiative
+- Besides offering a huge number of methods for preprocessing and analysis, it also includes a function to prepare our textual data for structural topic modeling
+
+## Quanteda corpus object
+
+- Using `corpus()`, you can create a quanteda corpus from a character vector or a data frame, which automatically includes meta data as document variables
+
+
+```{r}
+donor_corp <- corpus(df, text_field = 'project_essay', 
+                 docid_field = 'project_id')
+docvars(donor_corp)$text <- df$project_essay # we need unprocessed text later
+ndoc(donor_corp) # no. of documents
+```
+
+## KWIC
+
+- Before tokenization, corpus objects be used to discover [keywords in context](https://en.wikipedia.org/wiki/Key_Word_in_Context) (KWIC):
+
+```{r}
+kwic_donor <- kwic(donor_corp, pattern = c("ipad"),
+                      window = 5) # context window
+head(kwic_donor, 3)
+
+```
+
+
+## Tokenization
+
+- Tokens can be created from a corpus or character vector. The documentation (`?tokens()`) illustrates several options, e.g. for the removal of punctuation
+
+```{r}
+donor_tokens <- tokens(donor_corp)
+donor_tokens[[1]][1:20]
+```
+
+## Basic form of tokens
+
+- After tokenization text, some terms with similar semantic meaning might be regarded as different features (e.g. `love`, `loving`)
+- One solution is the application of [stemming](https://en.wikipedia.org/wiki/Stemming), which tries to reduce words to their basic form:
+
+```{r}
+words <- c("love", "loving", "lovingly", "loved", "lover", "lovely")
+char_wordstem(words, 'english')
+```
+
+## To stem or not to stem?
+
+- In the context of topic modeling, a [recent study](https://www.transacl.org/ojs/index.php/tacl/article/view/868/196) suggests that stemmers produce no meaningful improvement (for the English language)
+- Ultimately, whether stemming generates useful features or not varies by use case
+- An alternative that we won't cover in this course is [lemmatization](https://en.wikipedia.org/wiki/Lemmatisation), available via packages likes [spacyr](https://cran.r-project.org/web/packages/spacyr/index.html) and [udpipe](https://cran.r-project.org/web/packages/udpipe/index.html)
+
+
+## More preprocessing
+
+- Multiple preprocessing steps can be chained via the pipe operator, e.g  normalizing to lowercase and removing common English stopwords:
+
+```{r}
+donor_tokens <- donor_tokens %>% 
+tokens_tolower() %>% 
+tokens_remove(stopwords('english'), padding = TRUE)
+
+donor_tokens[[1]][1:10]
+```
+
+## Detecting collocations
+
+- Collocations (phrases) are sequences of tokens which symbolize shared semantic meaning, e.g. `United States`
+- Quanteda can detect collocations with log-linear models. An important parameter is the minimum collocation frequency, which can be used to fine-tune results
+
+```{r}
+colls <- textstat_collocations(donor_tokens,
+         min_count = 200) # minimum frequency
+donor_tokens <- tokens_compound(donor_tokens, colls, join = FALSE) %>% 
+                tokens_remove('') # remove empty strings
+
+donor_tokens[[1]][1:5]
+```
+
+## Document-Feature Matrix (DFM)
+
+- Most models for automated text analysis require matrices as an input format
+- A common variant which directrly translates to the bag of words format is the [document term matrix](https://en.wikipedia.org/wiki/Document-term_matrix) (in quanteda: document-feature matrix):
+
+ doc_id     I     like     hate    currywurst
+--------  ---   ------   ------  -------------
+     1     1      1         0         1
+     2     1      0         1         1
+
+## Creating a Document-Feature Matrix (dfm)
+
+- Problem: textual data is highly dimensional -> dfms's potentially grow to millions of rows & columns -> matrices for large text corpora don't fit in memory
+- Features are not evenly distributed (see e.g. [Zipf's law](https://en.wikipedia.org/wiki/Zipf%27s_law)) and most of these cells contain zeroes
+- Solution: Sparse data format, which does not include zero counts. Quanteda natively implements DFM's as [sparse Matrices](https://en.wikipedia.org/wiki/Sparse_matrix) 
+
+## DFM's in quanteda
+
+- Quanteda can create DFM's from character vectors, corpora and token objects
+- Preprocessing that does not need to account for word order can also be done during or after the creation of DFM's (see documentation for `tokens()`)
+
+```{r}
+dfm_donor <- dfm(donor_tokens, remove_numbers = TRUE)
+dim(dfm_donor)
+```
+
+
+## More preprocessing - feature trimming
+
+- As an alternative (or complement) to manually defining stopwords, terms occuring in a large proportion of documents can be removed automatically. Rationale: if almost every document includes a term, it is not a useful feature for categorization
+- Very rare terms are often removed, as they are also not very helpful for categorization and can lead to overfitting
+
+```{r}
+dfm_donor <- dfm_donor %>% 
+  dfm_keep(min_nchar = 2) %>% # remove chars with only one character
+  dfm_trim(min_docfreq = 0.002, max_docfreq = 0.50, #2% min, 50% max
+  docfreq_type = 'prop') # proportions instead of counts
+dim(dfm_donor)
+```
+
+
+## Prepare textual data for STM
+
+- You can provide input data for the stm package in several ways:
+
+     - via STM's own functions for text pre-processing
+     - via directly passing quanteda dfm's
+     - using quanteda's `convert()` function to prepare dfm's (recommended option)
+     
+```{r}
+out <- convert(dfm_donor, to = 'stm')
+names(out)
+```
+
+# Introducing structural topic models and tuning parameters
+
+## Introducing structural topic models and tuning parameters
+
+See our slides 
+
+## STM - model fitting 
+
+- For our first model, we will choose 30 topics and include school metro type, teacher gender and  a flexible [spline](https://en.wikipedia.org/wiki/Spline_(mathematics)) for date as prevalence covariates:
+
+```{r, eval = FALSE}
+stm_30 <- stm(documents = out$documents, 
+      vocab = out$vocab,
+      data = out$meta,
+      K = 30, 
+      prevalence = ~ school_metro_type + gender + s(date_num),
+      verbose = TRUE) # show progress
+
+stm_effects30 <- estimateEffect(1:30 ~ school_metro_type + 
+      gender + s(date_num),
+      stmobj = stm_30, metadata = out$meta)
+```
+
+## Saving and restoring models
+
+- Depending on the number of documents and the vocabulary size, fitting STM models can require a lot of memory and computation time
+- It can be useful to save model objects as R binaries and reload them as needed:
+
+```{r, eval = FALSE }
+save(out, stm_30, stm_effects30, file = "data/stm_donor.RData")
+```
+
+```{r}
+load("data/stm_donor.RData") # reload data
+```
+
+# Model validation and interactively exploring STM models
+
+
+## Interpreting structural topic models
+
+## Model interpretation - topic proportions
+
+- `plot.STM()` implements several options for model interpretation. 
+- *summary* plots show proportions and the most likely terms for each topic:
+
+
+## Model interpretation - topic proportions
+
+```{r fig.height=5, fig.width=9}
+plot.STM(stm_30, type = 'summary', text.cex = 0.8)
+```
+
+
+## Model interpretation - probability terms
+
+`label` plots show terms for each topic with (again) the most likely terms as a default:
+
+
+## Model interpretation - probability terms
+
+```{r fig.height=4, fig.width=7}
+plot.STM(stm_30, type = 'labels', n = 8, 
+         text.cex = 0.8, width = 100, topics = 1:5)
+```
+
+
+## Model interpretation - frex terms
+
+One strength of STM is that it also offers other metrics for topic terms. `frex` terms are both frequent and exclusive to a topic.
+
+
+## Model interpretation - frex terms
+
+```{r fig.height=4, fig.width=7}
+plot.STM(stm_30, type = 'labels', n = 8, text.cex = 0.8, 
+         width = 100, topics = 1:5, labeltype = 'frex')
+```
+
+
+## Model interpretation - don't rely on terms only
+
+- Assigning labels for topics only by looking at the most likely terms is generally not a good idea
+- Sometimes these terms contain domain-specific stop words. Sometimes they are hard to make sense of by themselves
+- Recommendation: 
+
+    - use probability (most likely) terms
+    - use frex terms
+    - **qualitatively examine representative documents**
+    
+    
+## Model interpretation - representative documents
+
+- STM allows to find representative (unprocessed) documents for each topic with `findThoughts()`, which can then be plotted with `plotQuote()`: 
+
+```{r }
+thoughts <- findThoughts(stm_30, 
+     texts = out$meta$text, # unprocessed documents
+     topics = 1:3,  n = 2) # topics and number of documents
+
+```
+
+
+## Model interpretation - representative documents
+
+```{r fig.height=5, fig.width=9}
+plotQuote(thoughts$docs[[3]][1], # topic 3
+          width = 80, text.cex = 0.75) 
+```
+
+## Model intepretation - perspective plot
+
+- It is also possible to visualize differences in word usage between two topics:
+
+```{r fig.height=5, fig.width=8}
+plot.STM(stm_30, type = 'perspective', topics = c(2,3))
+```
+
+## Interactive model validation - stminsights
+
+You can interactively validate and explore structural topic models using the R package *stminsights*. What you need:
+
+  - one or several stm models and corresponding effect estimates
+  - the `out` object used to fit the models
+  - the example `stm_donor.RData` includes all required objects
+
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+run_stminsights()
+```
+
+# Interpreting and visualizing prevalence and content effects
+
+- You already estimated prevalence effects. Now we'll see how to also estimate content effects and how to visualize effects
+
+- There are several options for interpreting and visualizing effects:
+  
+    - using functions of the STM package
+    - using stminsights function `get_effects()`
+    - usting stminsights interactive mode
+
+## Prevalence effects (stm package)
+
+## Options for visualizing prevalence effects
+
+- Prevalence covariates affect topic proportions 
+- They can be visualized in three ways:
+
+    - `pointestimate`: pointestimates for categorical variables
+    - `difference`: differences between topic proportions for two categories of one variable
+    - `continuous`: line plots for continuous variables
+- You can also visualize interaction effects if you integrated them in your STM model (see `?plot.estimateEffect()`)
+    
+## Prevalence effects - pointestimate
+
+```{r}
+plot.estimateEffect(stm_effects30, topic = 3, 
+            covariate = 'school_metro_type', method = 'pointestimate')
+```
+
+
+## Prevalence effects - difference
+
+```{r}
+plot.estimateEffect(stm_effects30, covariate = "gender", 
+                    topics = c(5:10), method = "difference",
+                    model = stm_30, # to show labels alongside
+                    cov.value1 = "Female", cov.value2 = "Male",
+                    xlab = "Male <---> Female", xlim = c(-0.08, 0.08),
+                    labeltype = "frex", n = 3, 
+                    width = 100,  verbose.labels = FALSE)
+```
+
+## Prevalence effects - continuous
+
+```{r}
+plot.estimateEffect(stm_effects30, covariate = "date_num", 
+                    topics = c(9:10), method = "continuous")
+```
+
+## Prevalence effects with stminsights
+
+- You can use `get_effects()` to store prevalence effects in a tidy data frame:
+
+```{r}
+effects <- get_effects(estimates = stm_effects30,
+                      variable = 'gender',
+                      type = 'pointestimate')
+```
+
+- Afterwards, effects can for instance be visualized with `ggplot2`
+
+## Prevalence effects with stminsights
+
+```{r}
+effects %>% filter(topic == 3) %>%
+ggplot(aes(x = value, y = proportion)) + geom_point() +
+ geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.1) +
+ coord_flip() + labs(x = 'Gender', y = 'Topic Proportion')
+```
+
+## STM content effects
+
+- Content effects allow covariates to affect word distributions **within a topic**  (e.g. female teachers talk differently about sports in comparison to male teachers). Example model formula: ``content = ~ gender``
+- This feature is powerful but comes with some disadvantages:
+
+    - You can only use one discrete variable for content effects
+    - Interpreting the model is more complicated (see `labelTopics() and sageLabels()
+    - We will focus on visualizing content effects with `perspective` plots
+
+## Fitting content models
+
+- Content models can (but do not have to) be combined with prevalence models. We fit a model with 20 topics and teacher gender as content covariate
+- Important note: this as a new model and can show different results, even if you compare it to a model with the same number of topics
+
+```{r, eval = FALSE}
+stm_20_content <- stm(documents = out$documents, 
+      vocab = out$vocab,
+      data = out$meta,
+      K = 20, 
+      prevalence = ~ school_metro_type + gender + s(date_num),
+      content = ~ gender,
+      verbose = FALSE) # show progress
+stm_effects20 <- estimateEffect(1:20 ~ school_metro_type + 
+      gender + s(date_num),
+      stmobj = stm_20_content, metadata = out$meta)
+save(stm_20_content, stm_effects20,file =  "data/stm_donor_content.RData")
+```
+
+## Load content model
+
+```{r}
+load("data/stm_donor_content.RData") # reload data
+```
+
+    
+## Visalizing content effects 
+
+```{r fig.height=6, fig.width=8}
+plot.STM(stm_20_content, topics = c(2), type = 'perspectives', 
+         covarlevels = c('Female', 'Male'))
+```
+
+
+# Open coding session
+
+- For the open coding session, you can choose to either play around with data and models from the tutorial, or try fitting stm models on your own data
+- We will be around to help you out and answer questions
+
+# Appendix - code to play around with
+
+## More about comparing models
+
+As for statistical diagnostics, the STM authors recommend to inspect semantic coherence and exclusivity (see [STM vignette](https://github.com/bstewart/stm/blob/master/inst/doc/stmVignette.pdf?raw=true)):
+    
+    - Semantic coherence is is maximized when the most probable words in a given topic frequently co-occur together
+    - Exclusivity (FREX) is maximized when a topic includes many exclusive terms
+- Coherence and exclusivity cannot be compared for models with content effects
+   
+## Fitting another model for comparisons
+
+```{r, eval = FALSE}
+stm_10 <- stm(documents = out$documents, 
+      vocab = out$vocab,
+      data = out$meta,
+      K = 10, 
+      prevalence = ~ school_metro_type * s(date_num), # interaction
+      verbose = FALSE) # show progress
+
+stm_effects10 <- estimateEffect(1:10 ~ school_metro_type + 
+      gender * s(date_num),
+      stmobj = stm_10, metadata = out$meta)
+
+save(stm_10, stm_effects10, file =  "data/stm_donor_int.RData")
+```
+
+```{r}
+load("data/stm_donor_int.RData") # reload data
+```
+
+## Calculating diagnostics (with stminsights)
+
+```{r}
+diag <- get_diag(models =  list(
+           model10 = stm_10, model30 = stm_30), out)
+diag %>% 
+  ggplot(aes(x = coherence, y = exclusivity, color = statistic))  + 
+  geom_text(aes(label = name), nudge_x = 2) + geom_point() + 
+  labs(x = 'Semantic Coherence', y = 'Exclusivity') 
+```
+
+## Correlation networks (with stminsights)
+
+```{r, message=FALSE, warning=FALSE}
+library(ggraph)
+stm_corrs <- get_network(model = stm_30,
+                         method = 'simple', # correlation criterion,
+                         cutoff = 0.05, # minimum correlation
+                         labels = paste('T', 1:30),
+                         cutiso = FALSE) # isolated nodes
+```
+
+## Correlation networks (with stminsights)
+
+```{r fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+ggraph(stm_corrs, layout = 'fr') + geom_edge_link(
+    aes(edge_width = weight), label_colour = '#fc8d62', 
+    edge_colour = '#377eb8') + geom_node_point(size = 4, colour = 'black')  +
+  geom_node_label(aes(label = name, size = props),
+                    colour = 'black',  repel = TRUE, alpha = 0.85) +
+  scale_size(range = c(2, 10), labels = scales::percent) +  
+  labs(size = 'Topic Proportion',  edge_width = 'Topic Correlation') + theme_graph()
+```
+
+
+
